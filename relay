@@ -704,6 +704,8 @@ init_feature() {
   done
 
   cat > "$sd/requirements.md" << EOF
+<!-- authored-by: human via kiro-relay — do not rewrite, refine only when explicitly asked -->
+
 # ${spec_name} — Requirements
 
 ## User Story
@@ -753,6 +755,8 @@ init_bugfix() {
   done
 
   cat > "$sd/bugfix.md" << EOF
+<!-- authored-by: human via kiro-relay — do not rewrite, refine only when explicitly asked -->
+
 # ${spec_name} — Bug Analysis
 
 ## Description
@@ -806,6 +810,8 @@ init_design() {
   read -r constraints
 
   cat > "$sd/design.md" << EOF
+<!-- authored-by: human via kiro-relay — do not rewrite, refine only when explicitly asked -->
+
 # ${spec_name} — Design
 
 ## Overview
@@ -851,6 +857,8 @@ init_tasks() {
   done
 
   cat > "$sd/tasks.md" << EOF
+<!-- authored-by: human via kiro-relay — do not rewrite, refine only when explicitly asked -->
+
 # ${spec_name} — Implementation Tasks
 
 EOF

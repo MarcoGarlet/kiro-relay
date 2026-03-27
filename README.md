@@ -111,20 +111,16 @@ When the agent resumes, reference the spec with `#spec:user-authentication` in K
 
 ## Steering tip
 
-Add this to `.kiro/steering/relay.md` so the agent knows about the handback protocol:
+Copy `steering/relay.md` from this repo into your project's `.kiro/steering/` folder. It tells the agent two things:
 
-```markdown
-# Human Relay Protocol
+1. **Handback protocol** — check for `HANDBACK.md` before resuming, don't redo completed tasks
+2. **Human-authored specs** — when spec files contain the `authored-by: human` marker, don't rewrite them
 
-When resuming work on a spec, always check for a `HANDBACK.md` file
-in the spec folder. If present:
-
-1. Read it completely before doing anything else
-2. Do NOT redo any task marked as completed
-3. Respect all "Human Amendment" sections in design.md and requirements.md
-4. Delete HANDBACK.md after you have consumed it
-5. Continue with the next incomplete task
+```bash
+cp ~/.kiro-relay/steering/relay.md your-project/.kiro/steering/relay.md
 ```
+
+Specs created with `relay init` automatically include the marker comment. The agent will see it and treat the spec as authoritative — no unsolicited rewrites, no added sections, no notation changes.
 
 ## License
 
