@@ -19,20 +19,20 @@ The agent finds `HANDBACK.md` inside the spec folder and knows exactly what happ
 ## Install
 
 ```bash
-# Clone
-git clone https://github.com/MarcoGarlet/kiro-relay.git
+# Option 1: global install (recommended)
+git clone https://github.com/YOUR_USER/kiro-relay.git ~/.kiro-relay
+ln -s ~/.kiro-relay/relay ~/.local/bin/relay
 
-# Add to PATH (pick one)
-ln -s "$(pwd)/kiro-relay/relay" ~/.local/bin/relay
-# or
-export PATH="$PATH:$(pwd)/kiro-relay"
+# Option 2: clone inside project (add to .gitignore)
+git clone https://github.com/YOUR_USER/kiro-relay.git .kiro/relay-tool
+echo '.kiro/relay-tool/' >> .gitignore
 ```
 
 No dependencies. Just bash.
 
 ## Usage
 
-Run from anywhere inside a Kiro project (a directory tree containing `.kiro/specs/`).
+Run from anywhere inside a Kiro project (a directory tree containing `.kiro/`).
 
 ```
 relay <command> [spec-name]
@@ -42,13 +42,28 @@ relay <command> [spec-name]
 
 | Command | What it does |
 |---|---|
+| `relay init` | Create a new spec from scratch — requirements, design, tasks via prompts |
 | `relay status` | Show tasks progress, active sessions, spec files |
 | `relay takeover` | Start a human session — picks a reason, snapshots tasks |
 | `relay update` | Log changes: complete tasks, add tasks, update design/requirements, log code changes |
 | `relay handback` | End the session, generate `HANDBACK.md` for the agent |
 | `relay log` | Show relay history for a spec |
 
-### Typical workflow
+### Create a spec from scratch
+
+When you want to define a feature (or bugfix) before the agent touches anything:
+
+```bash
+relay init user-authentication
+# → pick feature or bugfix
+# → fill in user story, acceptance criteria
+# → describe the design approach and components
+# → list implementation tasks
+```
+
+This creates a full `.kiro/specs/user-authentication/` folder with `requirements.md`, `design.md`, and `tasks.md` — all in Kiro's format. The agent can pick it up immediately with `#spec:user-authentication`.
+
+### Take over from the agent
 
 ```bash
 # Agent ran out of tokens, you jump in

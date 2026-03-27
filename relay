@@ -618,6 +618,254 @@ cmd_log() {
 }
 
 # ══════════════════════════════════════════════════════════════
+#  COMMAND: init
+# ══════════════════════════════════════════════════════════════
+cmd_init() {
+  # init can work even without an existing .kiro/specs — it creates it
+  local project_root="$PWD"
+  # walk up to find .kiro, or default to cwd
+  local dir="$PWD"
+  while [[ "$dir" != "/" ]]; do
+    if [[ -d "$dir/.kiro" ]]; then
+      project_root="$dir"
+      break
+    fi
+    dir="$(dirname "$dir")"
+  done
+
+  local specs_root="$project_root/.kiro/specs"
+  mkdir -p "$specs_root"
+
+  # spec name
+  local spec_name="${1:-}"
+  if [[ -z "$spec_name" ]]; then
+    echo -n "Spec name (kebab-case, e.g. user-authentication): "
+    read -r spec_name
+  fi
+  [[ -z "$spec_name" ]] && die "Spec name required"
+
+  # sanitize
+  spec_name=$(echo "$spec_name" | tr ' ' '-' | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9-')
+  [[ -z "$spec_name" ]] && die "Invalid spec name"
+
+  local sd="$specs_root/$spec_name"
+  if [[ -d "$sd" ]]; then
+    die "Spec '$spec_name' already exists at $sd"
+  fi
+
+  mkdir -p "$sd"
+
+  # ── spec type ──────────────────────────────────────────────
+  echo ""
+  echo "What kind of spec?"
+  echo "  1) Feature (new functionality)"
+  echo "  2) Bugfix"
+  echo -n "Type [1-2]: "
+  read -r spec_type
+
+  # ── requirements / bugfix ──────────────────────────────────
+  if [[ "$spec_type" == "2" ]]; then
+    init_bugfix "$sd" "$spec_name"
+  else
+    init_feature "$sd" "$spec_name"
+  fi
+
+  # ── design ─────────────────────────────────────────────────
+  init_design "$sd" "$spec_name"
+
+  # ── tasks ──────────────────────────────────────────────────
+  init_tasks "$sd" "$spec_name"
+
+  echo ""
+  ok "Spec '$spec_name' created at $sd"
+  info "Files: requirements.md, design.md, tasks.md"
+  info "The agent can pick this up with #spec:$spec_name"
+  echo ""
+}
+
+init_feature() {
+  local sd="$1" spec_name="$2"
+
+  echo ""
+  echo "--- Requirements ---"
+  echo ""
+  echo -n "User story (As a <who>, I want <what>, so that <why>): "
+  read -r user_story
+
+  echo ""
+  echo "Acceptance criteria (WHEN/THEN format)."
+  echo "Enter one per line, empty line to finish:"
+  local -a criteria=()
+  while true; do
+    echo -n "  > "
+    read -r ac
+    [[ -z "$ac" ]] && break
+    criteria+=("$ac")
+  done
+
+  cat > "$sd/requirements.md" << EOF
+# ${spec_name} — Requirements
+
+## User Story
+
+${user_story}
+
+## Acceptance Criteria
+
+EOF
+
+  for ac in "${criteria[@]}"; do
+    echo "- ${ac}" >> "$sd/requirements.md"
+  done
+
+  ok "requirements.md created"
+}
+
+init_bugfix() {
+  local sd="$1" spec_name="$2"
+
+  echo ""
+  echo "--- Bug Analysis ---"
+  echo ""
+  echo -n "Bug description (what is happening): "
+  read -r bug_desc
+
+  echo ""
+  echo -n "Steps to reproduce: "
+  read -r repro_steps
+
+  echo ""
+  echo -n "Current (broken) behavior: "
+  read -r current_behavior
+
+  echo ""
+  echo -n "Expected behavior: "
+  read -r expected_behavior
+
+  echo ""
+  echo "What must NOT change? (enter one per line, empty to finish):"
+  local -a unchanged=()
+  while true; do
+    echo -n "  > "
+    read -r uc
+    [[ -z "$uc" ]] && break
+    unchanged+=("$uc")
+  done
+
+  cat > "$sd/bugfix.md" << EOF
+# ${spec_name} — Bug Analysis
+
+## Description
+
+${bug_desc}
+
+## Reproduction Steps
+
+${repro_steps}
+
+## Current Behavior
+
+${current_behavior}
+
+## Expected Behavior
+
+${expected_behavior}
+
+## Unchanged Behavior
+
+EOF
+
+  for uc in "${unchanged[@]}"; do
+    echo "- WHEN relevant conditions THEN the system SHALL CONTINUE TO ${uc}" >> "$sd/bugfix.md"
+  done
+
+  ok "bugfix.md created"
+}
+
+init_design() {
+  local sd="$1" spec_name="$2"
+
+  echo ""
+  echo "--- Design ---"
+  echo ""
+  echo -n "High-level approach (how will you solve this): "
+  read -r approach
+
+  echo ""
+  echo "Key components or files involved (one per line, empty to finish):"
+  local -a components=()
+  while true; do
+    echo -n "  > "
+    read -r comp
+    [[ -z "$comp" ]] && break
+    components+=("$comp")
+  done
+
+  echo ""
+  echo -n "Any constraints or trade-offs to note? (or empty): "
+  read -r constraints
+
+  cat > "$sd/design.md" << EOF
+# ${spec_name} — Design
+
+## Overview
+
+${approach}
+
+## Components
+
+EOF
+
+  for comp in "${components[@]}"; do
+    echo "- ${comp}" >> "$sd/design.md"
+  done
+
+  if [[ -n "$constraints" ]]; then
+    cat >> "$sd/design.md" << EOF
+
+## Constraints and Trade-offs
+
+${constraints}
+EOF
+  fi
+
+  ok "design.md created"
+}
+
+init_tasks() {
+  local sd="$1" spec_name="$2"
+
+  echo ""
+  echo "--- Tasks ---"
+  echo ""
+  echo "Implementation tasks (one per line, empty to finish):"
+  echo "(prefix with spaces for sub-tasks)"
+
+  local -a tasks=()
+  local task_num=0
+  while true; do
+    echo -n "  > "
+    read -r task
+    [[ -z "$task" ]] && break
+    tasks+=("$task")
+  done
+
+  cat > "$sd/tasks.md" << EOF
+# ${spec_name} — Implementation Tasks
+
+EOF
+
+  for task in "${tasks[@]}"; do
+    # detect indentation for sub-tasks
+    local stripped="${task#"${task%%[![:space:]]*}"}"
+    local indent="${task%%"$stripped"}"
+    echo "${indent}- [ ] ${stripped}" >> "$sd/tasks.md"
+  done
+
+  ok "tasks.md created"
+}
+
+# ══════════════════════════════════════════════════════════════
 #  MAIN — dispatch
 # ══════════════════════════════════════════════════════════════
 usage() {
@@ -629,18 +877,25 @@ Usage:
   relay <command> [spec-name]
 
 Commands:
+  init       Create a new spec from scratch (human-authored)
   status     Show spec status and active sessions
   takeover   Start a human session (take control from agent)
   update     Log changes during a human session
   handback   End session and generate agent briefing
   log        Show relay history for a spec
 
-Workflow:
-  1. relay takeover    — tell the system you're taking over
-  2. relay update      — log each change you make (repeat)
-  3. relay handback    — generate HANDBACK.md for the agent
+Workflows:
+
+  Start a feature from scratch:
+    relay init
+
+  Take over from the agent:
+    1. relay takeover    — tell the system you're taking over
+    2. relay update      — log each change you make (repeat)
+    3. relay handback    — generate HANDBACK.md for the agent
 
 Examples:
+  relay init user-authentication
   relay status
   relay takeover user-authentication
   relay update user-authentication
@@ -654,6 +909,7 @@ main() {
   shift || true
 
   case "$cmd" in
+    init)     cmd_init "$@" ;;
     status)   cmd_status "$@" ;;
     takeover) cmd_takeover "$@" ;;
     update)   cmd_update "$@" ;;
