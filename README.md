@@ -86,6 +86,49 @@ relay handback user-authentication
 
 When the agent resumes, reference the spec with `#spec:user-authentication` in Kiro. The `HANDBACK.md` file is right there for it to read.
 
+### How the agent picks up your work
+
+Whether you created a spec from scratch with `relay init` or took over mid-flight with `relay takeover`, the agent needs to be told to look at it. Here's what to do in each scenario.
+
+**After `relay init` (human-authored spec, no prior agent work):**
+
+Open a spec session in Kiro and reference your spec:
+
+```
+#spec:user-authentication implement task 1
+```
+
+Or be more explicit if the agent hasn't seen the spec before:
+
+```
+I created a new spec for user-authentication. Read the requirements,
+design, and tasks in #spec:user-authentication and start with task 1.
+Do not modify the spec files — they are human-authored.
+```
+
+**After `relay handback` (resuming from a human session):**
+
+```
+I made some manual changes to #spec:user-authentication while you were away.
+Read HANDBACK.md in the spec folder first — it describes what I changed.
+Then continue with the next incomplete task.
+```
+
+Or more concisely:
+
+```
+#spec:user-authentication — read HANDBACK.md and resume from where I left off.
+```
+
+**After a token exhaustion (quick resume):**
+
+If you only completed a task or two without changing the design:
+
+```
+#spec:user-authentication I completed tasks 3.1 and 3.2 manually.
+Continue from task 4.1.
+```
+
 ## What gets created
 
 ```
