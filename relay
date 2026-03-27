@@ -1,0 +1,668 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# ─────────────────────────────────────────────────────────────
+# kiro-relay — human ↔ agent handoff for Kiro spec-driven dev
+# ─────────────────────────────────────────────────────────────
+
+VERSION="0.1.0"
+
+# ── helpers ──────────────────────────────────────────────────
+die()  { echo "error: $*" >&2; exit 1; }
+info() { echo "  $*"; }
+warn() { echo "  ! $*"; }
+ok()   { echo "  ok: $*"; }
+
+confirm() {
+  local prompt="${1:-Continue?}"
+  echo -n "$prompt [y/N] "
+  read -r ans
+  [[ "$ans" =~ ^[Yy]$ ]]
+}
+
+# ── locate kiro specs dir ────────────────────────────────────
+find_specs_root() {
+  # walk up from cwd looking for .kiro/specs
+  local dir="$PWD"
+  while [[ "$dir" != "/" ]]; do
+    if [[ -d "$dir/.kiro/specs" ]]; then
+      echo "$dir/.kiro/specs"
+      return 0
+    fi
+    dir="$(dirname "$dir")"
+  done
+  return 1
+}
+
+SPECS_ROOT=""
+ensure_specs() {
+  if [[ -z "$SPECS_ROOT" ]]; then
+    SPECS_ROOT="$(find_specs_root)" || die "No .kiro/specs found. Are you inside a Kiro project?"
+  fi
+}
+
+PROJECT_ROOT=""
+ensure_project() {
+  ensure_specs
+  PROJECT_ROOT="$(dirname "$(dirname "$SPECS_ROOT")")"
+}
+
+RELAY_DIR=""
+ensure_relay_dir() {
+  ensure_project
+  RELAY_DIR="$PROJECT_ROOT/.kiro/relay"
+  mkdir -p "$RELAY_DIR"
+}
+
+# ── list available specs ─────────────────────────────────────
+list_specs() {
+  ensure_specs
+  local specs=()
+  for d in "$SPECS_ROOT"/*/; do
+    [[ -d "$d" ]] && specs+=("$(basename "$d")")
+  done
+  if [[ ${#specs[@]} -eq 0 ]]; then
+    die "No specs found in $SPECS_ROOT"
+  fi
+  printf '%s\n' "${specs[@]}"
+}
+
+pick_spec() {
+  local specs
+  mapfile -t specs < <(list_specs)
+
+  if [[ ${#specs[@]} -eq 1 ]]; then
+    echo "${specs[0]}"
+    return
+  fi
+
+  echo "" >&2
+  echo "Available specs:" >&2
+  local i=1
+  for s in "${specs[@]}"; do
+    echo "  ${i}) $s" >&2
+    ((i++))
+  done
+  echo "" >&2
+  echo -n "Pick a spec [1-${#specs[@]}]: " >&2
+  read -r choice
+  if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#specs[@]} )); then
+    echo "${specs[$((choice-1))]}"
+  else
+    die "Invalid choice"
+  fi
+}
+
+spec_dir() {
+  ensure_specs
+  echo "$SPECS_ROOT/$1"
+}
+
+# ── timestamp ────────────────────────────────────────────────
+now_iso() { date -u +"%Y-%m-%dT%H:%M:%SZ"; }
+now_human() { date +"%Y-%m-%d %H:%M"; }
+
+# ══════════════════════════════════════════════════════════════
+#  COMMAND: status
+# ══════════════════════════════════════════════════════════════
+cmd_status() {
+  ensure_specs
+  local spec_name="${1:-}"
+  [[ -z "$spec_name" ]] && spec_name="$(pick_spec)"
+
+  local sd
+  sd="$(spec_dir "$spec_name")"
+  [[ -d "$sd" ]] || die "Spec '$spec_name' not found"
+
+  echo ""
+  echo "═══ Spec: ${spec_name} ═══"
+  echo ""
+
+  # tasks summary
+  if [[ -f "$sd/tasks.md" ]]; then
+    local total=0 done=0 in_progress=0
+    while IFS= read -r line; do
+      if [[ "$line" =~ ^[[:space:]]*-\ \[x\] ]]; then
+        ((done++)); ((total++))
+      elif [[ "$line" =~ ^[[:space:]]*-\ \[\ \] ]]; then
+        ((total++))
+      elif [[ "$line" =~ ^[[:space:]]*-\ \[\~\] ]]; then
+        ((in_progress++)); ((total++))
+      fi
+    done < "$sd/tasks.md"
+
+    echo "Tasks:  ${done} done  ${in_progress} in-progress  $((total - done - in_progress)) remaining  (${total} total)"
+  else
+    warn "No tasks.md found"
+  fi
+
+  # relay session?
+  ensure_relay_dir
+  local session_file="$RELAY_DIR/${spec_name}.session.md"
+  if [[ -f "$session_file" ]]; then
+    echo ""
+    echo "⚡ HUMAN SESSION ACTIVE"
+    # extract reason from session file
+    local reason
+    reason=$(grep "^**Reason:**" "$session_file" 2>/dev/null | head -1 | sed 's/\*\*Reason:\*\* //')
+    [[ -n "$reason" ]] && echo "   Reason: $reason"
+    local started
+    started=$(grep "^**Started:**" "$session_file" 2>/dev/null | head -1 | sed 's/\*\*Started:\*\* //')
+    [[ -n "$started" ]] && echo "   Since:  $started"
+  else
+    echo ""
+    echo "No active human session"
+  fi
+
+  # files overview
+  echo ""
+  echo "Spec files:"
+  for f in requirements.md bugfix.md design.md tasks.md; do
+    if [[ -f "$sd/$f" ]]; then
+      local lines
+      lines=$(wc -l < "$sd/$f")
+      echo "  ✓ $f  (${lines} lines)"
+    fi
+  done
+
+  echo ""
+}
+
+# ══════════════════════════════════════════════════════════════
+#  COMMAND: takeover
+# ══════════════════════════════════════════════════════════════
+cmd_takeover() {
+  ensure_relay_dir
+  local spec_name="${1:-}"
+  [[ -z "$spec_name" ]] && spec_name="$(pick_spec)"
+
+  local sd
+  sd="$(spec_dir "$spec_name")"
+  [[ -d "$sd" ]] || die "Spec '$spec_name' not found"
+
+  local session_file="$RELAY_DIR/${spec_name}.session.md"
+  if [[ -f "$session_file" ]]; then
+    warn "A human session is already active for '$spec_name'."
+    confirm "Override it?" || exit 0
+  fi
+
+  # ask reason
+  echo ""
+  echo "Why are you taking over?"
+  echo "  1) Agent ran out of tokens"
+  echo "  2) Hotfix / urgent manual change"
+  echo "  3) Agent went off-track"
+  echo "  4) Other"
+  echo ""
+  echo -n "Reason [1-4]: "
+  read -r rc
+  local reason
+  case "$rc" in
+    1) reason="Agent ran out of tokens" ;;
+    2) reason="Hotfix / urgent manual change" ;;
+    3) reason="Agent went off-track" ;;
+    4)
+      echo -n "Describe: "
+      read -r reason
+      ;;
+    *) reason="Unspecified" ;;
+  esac
+
+  # snapshot current tasks state
+  local tasks_snapshot=""
+  if [[ -f "$sd/tasks.md" ]]; then
+    tasks_snapshot=$(grep -E '^\s*- \[(x| |~)\]' "$sd/tasks.md" || true)
+  fi
+
+  cat > "$session_file" << EOF
+# Human Session — ${spec_name}
+
+**Started:** $(now_human)
+**Reason:** ${reason}
+
+## Tasks snapshot at takeover
+
+\`\`\`
+${tasks_snapshot}
+\`\`\`
+
+## Changes log
+
+<!-- relay update will append entries here -->
+
+EOF
+
+  ok "Human session started for '${spec_name}'"
+  info "Use relay update ${spec_name} to log your changes"
+  info "Use relay handback ${spec_name} when you're done"
+}
+
+# ══════════════════════════════════════════════════════════════
+#  COMMAND: update
+# ══════════════════════════════════════════════════════════════
+cmd_update() {
+  ensure_relay_dir
+  local spec_name="${1:-}"
+  [[ -z "$spec_name" ]] && spec_name="$(pick_spec)"
+
+  local sd
+  sd="$(spec_dir "$spec_name")"
+  [[ -d "$sd" ]] || die "Spec '$spec_name' not found"
+
+  local session_file="$RELAY_DIR/${spec_name}.session.md"
+  [[ -f "$session_file" ]] || die "No active session for '$spec_name'. Run: relay takeover $spec_name"
+
+  echo ""
+  echo "What did you change?"
+  echo "  1) Complete a task"
+  echo "  2) Add / modify a task"
+  echo "  3) Update design"
+  echo "  4) Update requirements"
+  echo "  5) Log a code change (no spec edit)"
+  echo ""
+  echo -n "Action [1-5]: "
+  read -r action
+
+  case "$action" in
+    1) update_complete_task "$spec_name" "$sd" "$session_file" ;;
+    2) update_add_modify_task "$spec_name" "$sd" "$session_file" ;;
+    3) update_design "$spec_name" "$sd" "$session_file" ;;
+    4) update_requirements "$spec_name" "$sd" "$session_file" ;;
+    5) update_code_change "$spec_name" "$sd" "$session_file" ;;
+    *) die "Invalid action" ;;
+  esac
+}
+
+update_complete_task() {
+  local spec_name="$1" sd="$2" session_file="$3"
+  local tasks_file="$sd/tasks.md"
+  [[ -f "$tasks_file" ]] || die "No tasks.md found"
+
+  # show incomplete tasks
+  echo ""
+  echo "Incomplete tasks:"
+  local i=0
+  local -a task_lines=() task_numbers=()
+  while IFS= read -r line; do
+    ((i++))
+    if [[ "$line" =~ ^[[:space:]]*-\ \[\ \] ]]; then
+      # extract task number if present (e.g. "1.2" or just the text)
+      local task_text="${line#*\] }"
+      echo "  ${i}) ${task_text}"
+      task_lines+=("$i")
+      task_numbers+=("$task_text")
+    fi
+  done < "$tasks_file"
+
+  if [[ ${#task_lines[@]} -eq 0 ]]; then
+    warn "All tasks already completed!"
+    return
+  fi
+
+  echo ""
+  echo -n "Which line number to mark done? "
+  read -r line_num
+
+  if [[ ! "$line_num" =~ ^[0-9]+$ ]]; then
+    die "Invalid line number"
+  fi
+
+  # replace [ ] with [x] on that line
+  sed -i "${line_num}s/\[ \]/[x]/" "$tasks_file"
+  ok "Task marked as completed in tasks.md"
+
+  # extract the task text for logging
+  local completed_text
+  completed_text=$(sed -n "${line_num}p" "$tasks_file" | sed 's/.*\[x\] //')
+
+  echo -n "How did you implement it? (brief): "
+  read -r impl_note
+
+  # append to session log
+  cat >> "$session_file" << EOF
+
+### $(now_human) — Task completed
+
+- **Task:** ${completed_text}
+- **Implementation:** ${impl_note}
+
+EOF
+
+  ok "Logged in session"
+}
+
+update_add_modify_task() {
+  local spec_name="$1" sd="$2" session_file="$3"
+  local tasks_file="$sd/tasks.md"
+  [[ -f "$tasks_file" ]] || die "No tasks.md found"
+
+  echo ""
+  echo "Add or modify?"
+  echo "  1) Add a new task"
+  echo "  2) Modify an existing task's description"
+  echo ""
+  echo -n "Choice [1-2]: "
+  read -r sub
+
+  if [[ "$sub" == "1" ]]; then
+    echo -n "After which line number? (0 = end of file): "
+    read -r after_line
+    echo -n "Task description: "
+    read -r task_desc
+    echo -n "Related requirement (e.g. REQ-2.1, or empty): "
+    read -r req_ref
+
+    local new_task="- [ ] ${task_desc}"
+    [[ -n "$req_ref" ]] && new_task="${new_task} - _Requirements: ${req_ref}_"
+
+    if [[ "$after_line" == "0" ]]; then
+      echo "$new_task" >> "$tasks_file"
+    else
+      sed -i "${after_line}a\\${new_task}" "$tasks_file"
+    fi
+
+    ok "Task added to tasks.md"
+
+    cat >> "$session_file" << EOF
+
+### $(now_human) — Task added
+
+- **Task:** ${task_desc}
+- **Requirement:** ${req_ref:-none}
+
+EOF
+
+  elif [[ "$sub" == "2" ]]; then
+    echo -n "Line number to modify: "
+    read -r mod_line
+    echo "Current:"
+    sed -n "${mod_line}p" "$tasks_file"
+    echo -n "New description (full line): "
+    read -r new_desc
+    sed -i "${mod_line}s|.*|${new_desc}|" "$tasks_file"
+    ok "Task modified in tasks.md"
+
+    cat >> "$session_file" << EOF
+
+### $(now_human) — Task modified
+
+- **Line:** ${mod_line}
+- **New:** ${new_desc}
+
+EOF
+
+  else
+    die "Invalid choice"
+  fi
+}
+
+update_design() {
+  local spec_name="$1" sd="$2" session_file="$3"
+  local design_file="$sd/design.md"
+  [[ -f "$design_file" ]] || die "No design.md found"
+
+  echo "What changed in the design? (one paragraph):"
+  echo ""
+  read -r design_change
+
+  echo -n "Which files were affected? (comma-separated): "
+  read -r affected_files
+
+  # append amendment section to design.md
+  cat >> "$design_file" << EOF
+
+## Human Amendment — $(now_human)
+
+${design_change}
+
+**Affected files:** ${affected_files}
+
+EOF
+
+  ok "Amendment appended to design.md"
+
+  cat >> "$session_file" << EOF
+
+### $(now_human) — Design updated
+
+- **Change:** ${design_change}
+- **Files:** ${affected_files}
+
+EOF
+
+  ok "Logged in session"
+}
+
+update_requirements() {
+  local spec_name="$1" sd="$2" session_file="$3"
+
+  # find requirements file (could be requirements.md or bugfix.md)
+  local req_file=""
+  if [[ -f "$sd/requirements.md" ]]; then
+    req_file="$sd/requirements.md"
+  elif [[ -f "$sd/bugfix.md" ]]; then
+    req_file="$sd/bugfix.md"
+  else
+    die "No requirements.md or bugfix.md found"
+  fi
+
+  echo "What changed in requirements? (one paragraph):"
+  echo ""
+  read -r req_change
+
+  cat >> "$req_file" << EOF
+
+## Human Amendment — $(now_human)
+
+${req_change}
+
+EOF
+
+  ok "Amendment appended to $(basename "$req_file")"
+
+  cat >> "$session_file" << EOF
+
+### $(now_human) — Requirements updated
+
+- **Change:** ${req_change}
+
+EOF
+
+  ok "Logged in session"
+}
+
+update_code_change() {
+  local spec_name="$1" sd="$2" session_file="$3"
+
+  echo -n "Which files did you change? (comma-separated): "
+  read -r changed_files
+
+  echo "What did you do and why? (brief):"
+  echo ""
+  read -r change_desc
+
+  echo -n "Does this affect any existing task? (task id or empty): "
+  read -r related_task
+
+  cat >> "$session_file" << EOF
+
+### $(now_human) — Code change (no spec edit)
+
+- **Files:** ${changed_files}
+- **Description:** ${change_desc}
+- **Related task:** ${related_task:-none}
+
+EOF
+
+  ok "Logged in session"
+}
+
+# ══════════════════════════════════════════════════════════════
+#  COMMAND: handback
+# ══════════════════════════════════════════════════════════════
+cmd_handback() {
+  ensure_relay_dir
+  local spec_name="${1:-}"
+  [[ -z "$spec_name" ]] && spec_name="$(pick_spec)"
+
+  local sd
+  sd="$(spec_dir "$spec_name")"
+  [[ -d "$sd" ]] || die "Spec '$spec_name' not found"
+
+  local session_file="$RELAY_DIR/${spec_name}.session.md"
+  [[ -f "$session_file" ]] || die "No active session for '$spec_name'"
+
+  echo "Any final notes for the agent? (or empty):"
+  echo ""
+  read -r final_notes
+
+  # ── build HANDBACK.md ──────────────────────────────────────
+  local handback_file="$sd/HANDBACK.md"
+
+  # extract changes from session
+  local changes_section
+  changes_section=$(sed -n '/^## Changes log/,$ p' "$session_file" | tail -n +2)
+
+  # current tasks diff
+  local tasks_now=""
+  if [[ -f "$sd/tasks.md" ]]; then
+    tasks_now=$(grep -E '^\s*- \[(x| |~)\]' "$sd/tasks.md" || true)
+  fi
+
+  cat > "$handback_file" << EOF
+# Agent Briefing — ${spec_name}
+
+> This file was generated by \`kiro-relay\` at $(now_human).
+> Read this before resuming work on this spec.
+
+## Summary
+
+A human operator took control of this spec. Below is everything
+that changed during the human session.
+
+${changes_section}
+
+## Current tasks state
+
+\`\`\`
+${tasks_now}
+\`\`\`
+
+EOF
+
+  if [[ -n "$final_notes" ]]; then
+    cat >> "$handback_file" << EOF
+## Notes from the human
+
+${final_notes}
+
+EOF
+  fi
+
+  cat >> "$handback_file" << EOF
+## What to do next
+
+1. Read the amendments in \`design.md\` and \`requirements.md\` (if any)
+2. Review the tasks state above — do NOT redo completed tasks
+3. Continue with the next incomplete task
+4. Remove this file when you have consumed it
+
+EOF
+
+  ok "Generated ${handback_file}"
+
+  # archive the session
+  local archive="$RELAY_DIR/${spec_name}.$(date +%Y%m%d-%H%M%S).session.md"
+  mv "$session_file" "$archive"
+  ok "Session archived to $(basename "$archive")"
+
+  echo ""
+  info "The agent will find HANDBACK.md inside the spec folder."
+  info "Add it to context with: #spec:${spec_name} in Kiro"
+  echo ""
+}
+
+# ══════════════════════════════════════════════════════════════
+#  COMMAND: log
+# ══════════════════════════════════════════════════════════════
+cmd_log() {
+  ensure_relay_dir
+  local spec_name="${1:-}"
+  [[ -z "$spec_name" ]] && spec_name="$(pick_spec)"
+
+  echo ""
+  echo "═══ Relay history: ${spec_name} ═══"
+  echo ""
+
+  local found=0
+  for f in "$RELAY_DIR"/${spec_name}.*.session.md; do
+    [[ -f "$f" ]] || continue
+    found=1
+    local ts
+    ts=$(basename "$f" | sed "s/${spec_name}\.\(.*\)\.session\.md/\1/")
+    local reason
+    reason=$(grep "^\\*\\*Reason:\\*\\*" "$f" 2>/dev/null | head -1 | sed 's/\*\*Reason:\*\* //')
+    echo "  ${ts}  ${reason}"
+  done
+
+  # also check active session
+  if [[ -f "$RELAY_DIR/${spec_name}.session.md" ]]; then
+    found=1
+    echo "  ● ACTIVE  $(grep "^\\*\\*Reason:\\*\\*" "$RELAY_DIR/${spec_name}.session.md" 2>/dev/null | head -1 | sed 's/\*\*Reason:\*\* //')"
+  fi
+
+  if [[ "$found" -eq 0 ]]; then
+    echo "  No relay history"
+  fi
+  echo ""
+}
+
+# ══════════════════════════════════════════════════════════════
+#  MAIN — dispatch
+# ══════════════════════════════════════════════════════════════
+usage() {
+  cat << EOF
+
+kiro-relay v${VERSION} — human ↔ agent handoff for Kiro SDD
+
+Usage:
+  relay <command> [spec-name]
+
+Commands:
+  status     Show spec status and active sessions
+  takeover   Start a human session (take control from agent)
+  update     Log changes during a human session
+  handback   End session and generate agent briefing
+  log        Show relay history for a spec
+
+Workflow:
+  1. relay takeover    — tell the system you're taking over
+  2. relay update      — log each change you make (repeat)
+  3. relay handback    — generate HANDBACK.md for the agent
+
+Examples:
+  relay status
+  relay takeover user-authentication
+  relay update user-authentication
+  relay handback user-authentication
+
+EOF
+}
+
+main() {
+  local cmd="${1:-}"
+  shift || true
+
+  case "$cmd" in
+    status)   cmd_status "$@" ;;
+    takeover) cmd_takeover "$@" ;;
+    update)   cmd_update "$@" ;;
+    handback) cmd_handback "$@" ;;
+    log)      cmd_log "$@" ;;
+    -h|--help|help|"") usage ;;
+    -v|--version) echo "kiro-relay v${VERSION}" ;;
+    *) die "Unknown command: $cmd. Run 'relay help' for usage." ;;
+  esac
+}
+
+main "$@"
